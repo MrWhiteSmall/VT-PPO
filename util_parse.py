@@ -1,6 +1,35 @@
 from MODEL_CKP import *
 import argparse
 import os
+import torch
+
+'''
+超参实验
+1 lora scale 的超参（实验≥5 次）
+2 reward 的相似度计算的超参（实验≥5 次）
+3 loss policy 中α β两个 loss 的权重实验（实验≥5 次）
+3 online ppo 训练采样次数的超参，默认是 5 次，然后梯度累计反传  以及  单次采样步数的超参 默认是 12（实验≥8 次）
+
+'''
+ls=0.5
+wc=.5
+wl=.2
+wh=.3
+policy_alpha=100 # reward weight
+policy_beta=0.01 # KL weight
+sample_times=5 # s
+sample_steps_per_time=12 # st
+
+outdir = f'output_ls{ls}_wc{wc}_wl{wl}_wh{wh}_pa{policy_alpha}_pb{policy_beta}_s{sample_times}_st{sample_steps_per_time}'
+mixed_precision_types = ["no", "fp16", "bf16"]
+mixed_precision = mixed_precision_types[0]
+weight_dtypes={
+          "no": torch.float32,
+          "fp16": torch.float16,
+          "bf16": torch.bfloat16,
+      }
+weight_dtype = weight_dtypes[mixed_precision]
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Training and evaluation script")
     # 模型路径相关参数
@@ -372,7 +401,7 @@ def parse_args():
     output_group.add_argument(
         "--output_dir",
         type=str,
-        default="output",
+        default=outdir,
         help="The output directory where results will be written."
     )
     output_group.add_argument(
@@ -432,7 +461,7 @@ def parse_args():
     performance_group.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default=mixed_precision,
         choices=["no", "fp16", "bf16"],
         help="Whether to use mixed precision."
     )

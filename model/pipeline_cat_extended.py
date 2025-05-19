@@ -343,7 +343,7 @@ class CatVTONPipeline:
         # Error no file named diffusion_pytorch_model.bin found in directory /root/lsj/checkpoints/ootd
         self.unet = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
         # self.unet = self.unet.float()
-        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
+        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet")
         init_adapter(self.unet, cross_attn_cls=LoRACrossAttnProcessor)  # Skip Cross-Attention
         init_adapter(self.unet_copy, cross_attn_cls=SkipAttnProcessor)  # Skip Cross-Attention
         
@@ -353,7 +353,7 @@ class CatVTONPipeline:
         self.attn_modules = get_trainable_module(self.unet, "attention2")
         self.attn_modules_copy = get_trainable_module(self.unet_copy, "attention")
         self.attn_modules = self.attn_modules.to(device, dtype=weight_dtype)
-        self.attn_modules_copy = self.attn_modules_copy.to(device, dtype=weight_dtype)
+        # self.attn_modules_copy = self.attn_modules_copy.to(device, dtype=weight_dtype)
         self.optimizer = torch.optim.AdamW(
                 list(self.attn_modules.parameters()),
                 lr=1e-5,
@@ -363,16 +363,6 @@ class CatVTONPipeline:
         )
         # self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
         self.auto_attn_ckpt_load_copy(attn_ckpt, attn_ckpt_version)
-        # Pytorch 2.0 Compile
-        # if compile:
-        # self.unet = torch.compile(self.unet)
-        # self.unet_copy = torch.compile(self.unet_copy)
-        self.vae = torch.compile(self.vae, mode="reduce-overhead")
-            
-        # Enable TF32 for faster training on Ampere GPUs (A100 and RTX 30 series).
-        # if use_tf32:
-        torch.set_float32_matmul_precision("high")
-        torch.backends.cuda.matmul.allow_tf32 = True
         
         self.vae.requires_grad_(False)
         # self.feature_extractor.requires_grad_(False)
@@ -381,9 +371,22 @@ class CatVTONPipeline:
         self.unet_copy.requires_grad_(False)
         self.attn_modules_copy.requires_grad_(False)
         self.attn_modules.requires_grad_(True)
+        
+        # Pytorch 2.0 Compile
+        self.unet_copy.eval()
+
+        self.vae = torch.compile(self.vae, mode="reduce-overhead")
+        # self.unet = torch.compile(self.unet)
+            
+        # Enable TF32 for faster training on Ampere GPUs (A100 and RTX 30 series).
+        # if use_tf32:
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        
         self.attn_modules.train()
-        # for param in self.attn_modules.parameters():
-        #     param.requires_grad = True
+
+        
+        self.collecting = []
 
     def forward_collect_traj_ddim(self, 
         image: Union[PIL.Image.Image, torch.Tensor],
@@ -463,6 +466,10 @@ class CatVTONPipeline:
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
         num_warmup_steps = (len(timesteps) - num_inference_steps * self.noise_scheduler.order)
 
+        self.latents_list.append((
+            latents.detach().clone().cpu()
+        ))
+
         if self.is_train:
             with tqdm.tqdm(total=num_inference_steps) as progress_bar:
                 # print('inference')
@@ -482,9 +489,19 @@ class CatVTONPipeline:
                                                             masked_latent_concat], dim=1)
                     inpainting_latent_model_input = \
                         inpainting_latent_model_input.to(self.device, dtype=self.weight_dtype) # torch.Size([2, 9, 128, 48])
-                    # print(inpainting_latent_model_input.shape,inpainting_latent_model_input.dtype)                                                            
+                    # print(inpainting_latent_model_input.shape,inpainting_latent_model_input.dtype)
+                    # 验证一下，输入是不是一样的
+                    # self.collecting.append(
+                    #     (inpainting_latent_model_input.detach().clone().cpu(),
+                    #      latents.detach().clone().cpu(),
+                    #      mask_latent_concat.detach().clone().cpu(),
+                    #      masked_latent_concat.detach().clone().cpu(),
+                    #      encoding_hidden_states.detach().clone().cpu(),
+                    #      t)
+                                        #    )                                                            
                     # print(t.shape)                                                            
                     # predict the noise residual
+                    # with torch.no_grad():
                     noise_pred= self.unet(
                         inpainting_latent_model_input,
                         t,
@@ -510,33 +527,30 @@ class CatVTONPipeline:
                     # ).prev_sample
                     unsqueeze3x = lambda x: x[Ellipsis, None, None, None]
                     unet_t = unsqueeze3x(torch.tensor([t])).to(noise_pred.device) # shape = torch.Size([1, 1, 1, 1])
-                    unet_times = unsqueeze3x(torch.tensor([t] * noise_pred.shape[0])).to(noise_pred.device)
-                    prev_latents = latents.clone()
+                    # unet_times = unsqueeze3x(torch.tensor([t] * noise_pred.shape[0])).to(noise_pred.device)
+                    # prev_latents = latents.clone()
                     # noise_pred : torch.Size([1, 4, 256, 96])
-                    latents, log_prob = self.noise_scheduler.step_logprob(
+                    
+                    # 这里的log 计算的是 p(x_t-1|x_t,z_t)
+                    #       公式中 通过 xt zt 计算 可能的 x_t-1 并计算转移过去的概率
+                    pesudo_latents, log_prob = self.noise_scheduler.step_logprob(
                         noise_pred, unet_t, latents, **extra_step_kwargs
                     )
-                    latents = latents.prev_sample
+                    pesudo_latents = pesudo_latents.prev_sample
                     # latents = latents.to(inpainting_latent_model_input.dtype)
+                    
+                    # 这个才是真的 latents
+                    # 上面是加了一个随机噪声而已  这里的latent用于 下一个函数 p( x_t-1|x_t )
+                    #       公式中 并不知道 x_t-1如何计算，所以直接给出当前的预测内容
+                    #           后续中 x_t-1 就是时间步计算所需的 label
+                    latents = self.noise_scheduler.step(
+                        noise_pred, t, latents, **extra_step_kwargs
+                    ).prev_sample
                     self.latents_list.append((
                                               latents
                                               ).detach().clone().cpu())
                     self.log_prob_list.append(log_prob.detach().clone().cpu())
-                    
-                    # old_log_prob = (
-                    #     self.noise_scheduler.step_forward_logprob(
-                    #         noise_pred,
-                    #         unet_times,
-                    #         prev_latents, # xt
-                    #         latents, # x t-1
-                    #         **extra_step_kwargs
-                    #     )
-                    #     .detach()
-                    #     .cpu()
-                    # )
-                    # self.kl_list.append((log_prob - old_log_prob).detach().clone().cpu())
-                    
-                    
+
                     # call the callback, if provided
                     if i == len(timesteps) - 1 or (
                         (i + 1) > num_warmup_steps
@@ -681,10 +695,6 @@ class CatVTONPipeline:
         ts=None,
         next_latents=None,
         
-        image: Union[PIL.Image.Image, torch.Tensor]=None,
-        condition_image: Union[PIL.Image.Image, torch.Tensor]=None,
-        mask: Union[PIL.Image.Image, torch.Tensor]=None,
-
         mask_latent_concat=None, 
         masked_latent_concat=None,
         encoding_hidden_states=None,
@@ -694,18 +704,7 @@ class CatVTONPipeline:
         width: int = 768,
         generator=None,
         
-        unet_copy=None,
-        negative_prompt = None,
-        num_images_per_prompt = 1,
         eta = 1.0,
-        negative_prompt_embeds = None,
-        output_type = "pil",
-        return_dict = True,
-        callback = None,
-        callback_steps = 1,
-        cross_attention_kwargs = None,
-        is_ddp = False,
-        soft_reward=False,
         
     ):
         latents = latents.to(self.device, dtype=self.weight_dtype)
@@ -739,18 +738,29 @@ class CatVTONPipeline:
         # print(inpainting_latent_model_input.shape)                                                            
         # print(ts.shape)                                                            
         # predict the noise residual
+        
+        # 在 self.collecting 寻找 t==ts 查看此时 inpainting_latent_model_input 是否相同
+        # find_resv = next((x for x in self.collecting if x[-1] == ts),None)
+        # if inpainting_latent_model_input.detach().clone().cpu() == find_resv[0].detach().clone().cpu():
+        #     print('inpainting_latent_model_input is same')
+        # else:
+        #     print('inpainting_latent_model_input is different')
         noise_pred= self.unet(
             inpainting_latent_model_input,
             ts,
             encoder_hidden_states=encoding_hidden_states, # FIXME
             return_dict=False,
         )[0]
-        old_noise_pred = self.unet_copy(
-            inpainting_latent_model_input,
-            ts,
-            encoder_hidden_states=None, # FIXME
-            return_dict=False,
-        )[0]
+        with torch.no_grad():
+            # tocuda -> process -> tocpu
+            self.unet_copy.to(self.device, dtype=self.weight_dtype)
+            old_noise_pred = self.unet_copy(
+                inpainting_latent_model_input,
+                ts,
+                encoder_hidden_states=None, # FIXME
+                return_dict=False,
+            )[0]
+            self.unet_copy.to('cpu', dtype=torch.float32)
 
         # perform guidance
         if do_classifier_free_guidance:

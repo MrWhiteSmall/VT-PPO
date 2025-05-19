@@ -39,8 +39,11 @@ class LoRACrossAttnProcessor(torch.nn.Module):
         self.to_v_lora = LoRALinearLayer(cross_attention_dim, hidden_size, rank)
         self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
 
+    # lora scale :[0.1 0.2 0.5 0.8 1.0]
+    #             [  1   1   1   .  1 ]
     def __call__(
-        self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, scale=1.0
+        self, attn, hidden_states, encoder_hidden_states=None, 
+        attention_mask=None, scale=0.5
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
@@ -64,6 +67,8 @@ class LoRACrossAttnProcessor(torch.nn.Module):
         hidden_states = attn.to_out[0](hidden_states) + scale * self.to_out_lora(hidden_states)
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
+        
+        hidden_states = hidden_states / attn.rescale_output_factor
 
         return hidden_states
 

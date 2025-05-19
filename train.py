@@ -29,16 +29,16 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed  # pylint: disable=g-multiple-import
 import datasets
-# from datasets import load_dataset
+from datasets import load_dataset
 import diffusers
 from diffusers import UNet2DConditionModel
-# from diffusers.loaders import AttnProcsLayers
-# from diffusers.models.cross_attention import LoRACrossAttnProcessor
+from diffusers.loaders import AttnProcsLayers
+from diffusers.models.cross_attention import LoRACrossAttnProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import deprecate
 # from diffusers.utils.import_utils import is_xformers_available
-# import ImageReward as imagereward
+import ImageReward as imagereward
 import numpy as np
 # from packaging import version
 # from pipeline_stable_diffusion_extended import StableDiffusionPipelineExtended
@@ -64,10 +64,7 @@ from cat_utils import get_text_embeddings,get_image_embeddings
 logger = get_logger(__name__, log_level="INFO")
 
 from util_parse import parse_args
-from util_reward import get_similarity
-from util_mask import get_mask_location_all
-# from preprocess.humanparsing.run_parsing import Parsing
-from util_mask_for_reward import parsing_model
+
 dataset_name_mapping = {
     "lambdalabs/pokemon-blip-captions": ("image", "text"),
 }
@@ -218,6 +215,12 @@ def _get_batch(data_iter_loader, data_iterator, prompt_list, args, accelerator):
             )
         )
     )
+
+  # if args.single_flag == 1:
+    # for i in range(len(batch)):
+      # batch[i] = args.single_prompt
+      # batch[i] = batch[0]
+
   batch_list = []
   for i in range(len(batch)):
     # batch text只取前两句话
@@ -255,17 +258,14 @@ def _save_model(args, count, is_ddp, accelerator, unet):
     )
     unet_to_save.save_attn_procs(save_path)
   else:
-    unet_to_save = copy.deepcopy(unet).to(args.weight_dtype)
+    unet_to_save = copy.deepcopy(unet).to(torch.float32)
     unet_to_save.save_attn_procs(save_path)
 
 
 def _collect_rollout(args, pipe, is_ddp, 
                      batch, calculate_reward, state_dict,
                      reward_processor=None, reward_clip_model=None,
-                     tokenizer=None,text_encoder=None,
-                     device=None,dtype=None):
-  
-  model_input_shape = (args.width , args.height) # w h
+                     tokenizer=None,text_encoder=None):
   """Collects trajectories."""
   person_path = osj(data_root,batch[0]['image_file']) 
   cloth_path = osj(data_root,batch[0]['cloth_file'])
@@ -277,17 +277,19 @@ def _collect_rollout(args, pipe, is_ddp,
   # person_images = batch['person']
   # cloth_images = batch['cloth']
   # from model.cloth_masker import AutoMasker
-  # from controlnet_aux import OpenposeDetector
+  from util_mask import get_mask_location_all
+  from controlnet_aux import OpenposeDetector
+  from preprocess.humanparsing.run_parsing import Parsing
   # 如果存在mask_path就直接读取
   if os.path.exists(os.path.join(data_root, "cloth_mask", person_path.split("/")[-1].replace(".jpg", ".png"))):
     cloth_mask = Image.open(os.path.join(data_root, "cloth_mask", person_path.split("/")[-1].replace(".jpg", ".png")))
   else:
     pose_img_pil = person_image
-    # openpose_model = OpenposeDetector.from_pretrained(POSE_DETECTOR_PATH).to("cuda:0")
-    # parsing_model = Parsing(0)
-    # with torch.no_grad():
-    #   pose_image = openpose_model(pose_img_pil.convert("RGB"))
-    # pose_image = diffusers.utils.load_image(pose_image)
+    openpose_model = OpenposeDetector.from_pretrained(POSE_DETECTOR_PATH).to("cuda:0")
+    parsing_model = Parsing(0)
+    with torch.no_grad():
+      pose_image = openpose_model(pose_img_pil.convert("RGB"))
+    pose_image = diffusers.utils.load_image(pose_image)
     target_shape = (384 , 512) # w h
     model_img_pil = pose_img_pil.resize(target_shape)
     model_parse, _ = parsing_model(model_img_pil.resize(target_shape))
@@ -296,20 +298,27 @@ def _collect_rollout(args, pipe, is_ddp,
     save_dir = os.path.join(data_root, "cloth_mask")
     os.makedirs(save_dir, exist_ok=True)
     cloth_mask.save(os.path.join(save_dir, person_path.split("/")[-1].replace(".jpg", ".png")))
-  person_image = person_image.resize(model_input_shape)
-  cloth_image = cloth_image.resize(model_input_shape)
-  mask = cloth_mask.resize(model_input_shape)
+  # automasker = AutoMasker(
+  #     densepose_ckpt=os.path.join(repo_path, "DensePose"),
+  #     schp_ckpt=os.path.join(repo_path, "SCHP"),
+  #     device='cuda', 
+  # )
+  # mask_ori = automasker(
+  #     person_path,
+  #     cloth_type='upper',
+  # )['mask']
+  # masks = batch['mask']  # 调用automasker自动获取
+  # person_image=vae_processor.preprocess(person_image, args.height, args.width)[0].unsqueeze_(0)
+  # cloth_image = vae_processor.preprocess(cloth_image, args.height, args.width)[0].unsqueeze_(0)
+  # mask = mask_processor.preprocess(mask_ori, args.height, args.width)[0].unsqueeze_(0)
+  person_image = person_image.resize((args.height, args.width))
+  cloth_image = cloth_image.resize((args.height, args.width))
+  mask = cloth_mask.resize((args.height, args.width))
   
-  # 减少显存占用
-  # 加载到cuda -> 处理 -> 手动offload
-  reward_clip_model.to(device, dtype=dtype)
-  text_encoder.to(device, dtype=dtype)
   encoding_clo_hidden_states = get_image_embeddings(cloth_image,
                                                 reward_processor,reward_clip_model)
   encoding_text_hidden_states = get_text_embeddings(text,
                                                tokenizer,text_encoder)
-  reward_clip_model.to("cpu")
-  text_encoder.to("cpu")
   
   # encoding_hidden_states = concat(text,cloth)
   encoding_hidden_states = torch.cat([encoding_text_hidden_states,
@@ -328,7 +337,7 @@ def _collect_rollout(args, pipe, is_ddp,
 
     with torch.no_grad():
       (
-          image,  # 什么类型？pil
+          image,
           latents_list,
           unconditional_prompt_embeds,
           guided_prompt_embeds,
@@ -354,18 +363,10 @@ def _collect_rollout(args, pipe, is_ddp,
       
       reward_list = []
       txt_emb_list = []
-      txt_emb = encoding_text_hidden_states[:, 0, :][0]
-      # for i in range(len(batch)):
-      #   reward, txt_emb = calculate_reward(image[i], batch[i]['text'])
-      #   reward_list.append(reward)
-      #   txt_emb_list.append(txt_emb)
-        
-      model_path = person_path
-      model_pred = image[0]
-      reward = get_similarity(model_path, model_pred)
-      reward_list.append(torch.tensor([reward],dtype=args.weight_dtype))
-      txt_emb_list.append(txt_emb)
-        
+      for i in range(len(batch)):
+        reward, txt_emb = calculate_reward(image[i], batch[i]['text'])
+        reward_list.append(reward)
+        txt_emb_list.append(txt_emb)
       reward_list = torch.stack(reward_list).detach().cpu()
       txt_emb_list = torch.stack(txt_emb_list).detach().cpu()
       # store the rollout data
@@ -505,33 +506,32 @@ def _train_policy_func(
     batch_log_prob = state_dict["log_prob"][indices]
   # calculate loss from the custom function
   # (modified in pipeline_stable_diffusion.py and scheduling_ddim.py)
-  from torch.cuda.amp import autocast
-  with autocast():
-    log_prob, kl_regularizer = pipe.forward_calculate_logprob(
-        latents=batch_state.cuda(),
-        next_latents=batch_next_state.cuda(),
-        ts=ts.cuda(),
-        # unet_copy=unet_copy,
-        # is_ddp=is_ddp,
-        mask_latent_concat = mask_latent_concat.cuda(),
-        masked_latent_concat = masked_latent_concat.cuda(),
-        encoding_hidden_states=encoding_hidden_states,
-        
-        num_inference_steps=args.num_inference_steps,
-        guidance_scale=args.guidance_scale,
-        height=args.height,
-        width=args.width,
-        generator=generator,
-    )
-  if args.v_flag == 1:
-    # pylint: disable=line-too-long
-    adv = batch_final_reward.cuda().reshape([args.p_batch_size, 1]) - value_function(
-        batch_state.cuda(),
-        batch_txt_emb.cuda(),
-        batch_timestep.cuda()).reshape([args.p_batch_size, 1])
-  else:
-    adv = batch_final_reward.cuda().reshape([args.p_batch_size, 1])
-  ratio = torch.exp(log_prob.cuda() - batch_log_prob.cuda())  # ratio 恒等于 1
+  log_prob, kl_regularizer = pipe.forward_calculate_logprob(
+      latents=batch_state.cuda(),
+      next_latents=batch_next_state.cuda(),
+      ts=ts.cuda(),
+      # unet_copy=unet_copy,
+      # is_ddp=is_ddp,
+      mask_latent_concat = mask_latent_concat.cuda(),
+      masked_latent_concat = masked_latent_concat.cuda(),
+      encoding_hidden_states=encoding_hidden_states,
+      
+      num_inference_steps=args.num_inference_steps,
+      guidance_scale=args.guidance_scale,
+      height=args.height,
+      width=args.width,
+      generator=generator,
+  )
+  with torch.no_grad():
+    if args.v_flag == 1:
+      # pylint: disable=line-too-long
+      adv = batch_final_reward.cuda().reshape([args.p_batch_size, 1]) - value_function(
+          batch_state.cuda(),
+          batch_txt_emb.cuda(),
+          batch_timestep.cuda()).reshape([args.p_batch_size, 1])
+    else:
+      adv = batch_final_reward.cuda().reshape([args.p_batch_size, 1])
+  ratio = torch.exp(log_prob.cuda() - batch_log_prob.cuda())
   ratio = torch.clamp(ratio, 1.0 - args.ratio_clip, 1.0 + args.ratio_clip)
   loss = (
       -args.reward_weight
@@ -553,8 +553,6 @@ def _train_policy_func(
 
 def main():
   args = parse_args()
-  
-
   if args.non_ema_revision is not None:
     deprecate(
         "non_ema_revision!=None",
@@ -576,13 +574,6 @@ def main():
       log_with=args.report_to,
       project_config=accelerator_project_config,
   )
-  
-  if accelerator.is_main_process:
-    accelerator.init_trackers("vton-fine-tune", config=vars(args))
-
-  from util_parse import weight_dtype
-  args.weight_dtype = weight_dtype
-  
 
   # Make one log on every process with the configuration for debugging.
   logging.basicConfig(
@@ -608,12 +599,11 @@ def main():
   if accelerator.is_main_process:
     os.makedirs(args.output_dir, exist_ok=True)
 
-  # weight_dtype = torch.float32
-  # if accelerator.mixed_precision == "fp16":
-  #   weight_dtype = torch.float16
-  # elif accelerator.mixed_precision == "bf16":
-  #   weight_dtype = torch.bfloat16
-  weight_dtype = args.weight_dtype
+  weight_dtype = torch.float32
+  if accelerator.mixed_precision == "fp16":
+    weight_dtype = torch.float16
+  elif accelerator.mixed_precision == "bf16":
+    weight_dtype = torch.bfloat16
 
   # Load scheduler, tokenizer and models.
   tokenizer = CLIPTokenizer.from_pretrained(
@@ -636,6 +626,17 @@ def main():
       CLIP_PATH
   )
   
+
+  if args.reward_flag == 0:
+    image_reward = imagereward.load(REWARD_PATH,
+                                    med_config=REWARD_CONFIG_PATH)
+    image_reward.requires_grad_(False)
+    image_reward.to(accelerator.device, dtype=weight_dtype)
+  else:
+    reward_model = pickle.load(open(args.reward_model_path, "rb"))["reward"]
+    reward_model.requires_grad_(False)
+    reward_model.to(accelerator.device, dtype=weight_dtype)
+
   reward_clip_model.requires_grad_(False)
 
   # pipe = StableDiffusionPipelineExtended.from_pretrained(
@@ -656,8 +657,25 @@ def main():
   )
   unet = pipe.unet
 
+  # pipe.scheduler = DDIMSchedulerExtended.from_config(pipe.scheduler.config)
+  # vae = pipe.vae
+  # unet.requires_grad_(False)
+  # unet.eval()
+  # text_encoder = pipe.text_encoder
+
+  # Freeze vae and text_encoder
+  # vae.requires_grad_(False)
+  # text_encoder.requires_grad_(False)
   # pretrain model to calculate kl
   unet_copy = pipe.unet_copy
+  # freeze unet copy
+  # unet_copy.requires_grad_(False)
+  # Move text_encode and vae to gpu and cast to weight_dtype
+  # text_encoder.to(accelerator.device, dtype=weight_dtype)
+  # vae.to(accelerator.device, dtype=weight_dtype)
+  # unet.to(accelerator.device, dtype=weight_dtype)
+  # unet_copy.to(accelerator.device, dtype=weight_dtype)
+
   # Create EMA for the unet.
   if args.use_ema:
     ema_unet = UNet2DConditionModel.from_pretrained(
@@ -750,7 +768,7 @@ def main():
       num_training_steps=args.max_train_steps
       * args.gradient_accumulation_steps,
   )
-  steps_for_value_train = 50
+  steps_for_value_train = 49
   tar_shape = (4, 128*2, 96)
   value_function = ValueMulti(steps_for_value_train, tar_shape)
   value_optimizer = torch.optim.AdamW(value_function.parameters(), lr=args.v_lr)
@@ -771,8 +789,10 @@ def main():
   if args.use_ema:
     ema_unet.to(accelerator.device)
 
-  # reward_clip_model.to(accelerator.device, dtype=weight_dtype)
-  # text_encoder.to(accelerator.device, dtype=weight_dtype)
+  # reward_processor.to(accelerator.device, dtype=weight_dtype)
+  reward_clip_model.to(accelerator.device, dtype=weight_dtype)
+  # tokenizer.to(accelerator.device, dtype=weight_dtype)
+  text_encoder.to(accelerator.device, dtype=weight_dtype)
 
   # 使用示例
   # image = torch.randint(low=0,high=255,size=(1, 3, 512, 512))  # 假设输入图像
@@ -783,7 +803,8 @@ def main():
   # text_embeddings = get_text_embeddings(prompt, tokenizer, text_encoder)
   
 
-
+  if accelerator.is_main_process:
+    accelerator.init_trackers("text2image-fine-tune", config=vars(args))
 
   # Train!
   total_batch_size = (
@@ -871,7 +892,7 @@ def main():
         tokenizer,
         weight_dtype,
         reward_clip_model,
-        None,
+        image_reward,
     )
   else:
     calculate_reward = functools.partial(
@@ -883,7 +904,7 @@ def main():
         weight_dtype,
         reward_clip_model,
         reward_processor,
-        None,
+        reward_model,
     )
 
   count = 0
@@ -914,11 +935,9 @@ def main():
       # batch = _get_batch(
       #     data_iter_loader, _my_data_iterator, prompt_list, args, accelerator
       # )
-    _collect_rollout(args, pipe, is_ddp, batch, 
-                     calculate_reward, state_dict,
+    _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict,
                      reward_processor=reward_processor, reward_clip_model=reward_clip_model,
-                     tokenizer=tokenizer,text_encoder=text_encoder,
-                     device=accelerator.device,dtype=weight_dtype)
+                     tokenizer=tokenizer,text_encoder=text_encoder)
     _trim_buffer(buffer_size, state_dict)
 
     if args.v_flag == 1:
@@ -976,12 +995,6 @@ def main():
           )
         # break
       if accelerator.sync_gradients:
-        if args.mixed_precision != 'no':
-          device = next(unet.parameters()).device
-          with torch.cuda.amp.autocast(enabled=False):
-            for param in unet.parameters():
-              if param.grad is not None:
-                param.grad.data = param.grad.data.to(device=device, dtype=torch.float32)
         norm = accelerator.clip_grad_norm_(unet.parameters(), args.clip_norm)
       tpfdata.tot_grad_norm += norm.item() / args.p_step
       optimizer.step()
