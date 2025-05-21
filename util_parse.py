@@ -11,7 +11,7 @@ import torch
 3 online ppo 训练采样次数的超参，默认是 5 次，然后梯度累计反传  以及  单次采样步数的超参 默认是 12（实验≥8 次）
 
 '''
-ls=0.5
+ls=0.8
 wc=.5
 wl=.2
 wh=.3
@@ -19,8 +19,9 @@ policy_alpha=100 # reward weight
 policy_beta=0.01 # KL weight
 sample_times=5 # s
 sample_steps_per_time=12 # st
-
+# _clotxt
 outdir = f'output_ls{ls}_wc{wc}_wl{wl}_wh{wh}_pa{policy_alpha}_pb{policy_beta}_s{sample_times}_st{sample_steps_per_time}'
+# outdir = f'output_try'
 mixed_precision_types = ["no", "fp16", "bf16"]
 mixed_precision = mixed_precision_types[0]
 weight_dtypes={
@@ -29,6 +30,14 @@ weight_dtypes={
           "bf16": torch.bfloat16,
       }
 weight_dtype = weight_dtypes[mixed_precision]
+
+resume_from_checkpoint = 'latest'
+resume_from_checkpoint = None
+# resume_path = ''
+
+# 采样步数
+gradient_accumulation_steps = 3
+p_step = 5
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Training and evaluation script")
@@ -207,7 +216,7 @@ def parse_args():
     training_group.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=12,
+        default=gradient_accumulation_steps,
         help="Number of updates steps to accumulate before backward pass."
     )
     training_group.add_argument(
@@ -314,7 +323,7 @@ def parse_args():
     rl_group.add_argument(
         "--p_step",
         type=int,
-        default=5,
+        default=p_step,
         help="Number of steps to update the policy per sampling step."
     )
     rl_group.add_argument(
@@ -446,7 +455,7 @@ def parse_args():
     checkpoint_group.add_argument(
         "--resume_from_checkpoint",
         type=str,
-        default=None,
+        default=resume_from_checkpoint,
         help="Whether training should be resumed from a previous checkpoint."
     )
 

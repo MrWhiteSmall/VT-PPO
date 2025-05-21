@@ -4,7 +4,7 @@ import torch.nn as nn
 # from flash_attn import flash_attn_func
 
 class LoRALinearLayer(torch.nn.Module):
-    def __init__(self, in_features, out_features, rank=4):
+    def __init__(self, in_features, out_features, rank=8):
         super().__init__()
 
         if rank > min(in_features, out_features):
@@ -14,6 +14,7 @@ class LoRALinearLayer(torch.nn.Module):
         self.up = nn.Linear(rank, out_features, bias=False)
 
         nn.init.normal_(self.down.weight, std=1 / rank)
+        # nn.init.zeros_(self.down.weight)
         nn.init.zeros_(self.up.weight)
 
     def forward(self, hidden_states):
@@ -43,7 +44,55 @@ class LoRACrossAttnProcessor(torch.nn.Module):
     #             [  1   1   1   .  1 ]
     def __call__(
         self, attn, hidden_states, encoder_hidden_states=None, 
-        attention_mask=None, scale=0.5
+        attention_mask=None, scale=0.1
+    ):
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+
+        query = attn.to_q(hidden_states) + scale * self.to_q_lora(hidden_states)
+        query = attn.head_to_batch_dim(query)
+
+        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+
+        key = attn.to_k(encoder_hidden_states) + scale * self.to_k_lora(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states) + scale * self.to_v_lora(encoder_hidden_states)
+
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states) + scale * self.to_out_lora(hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+        
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
+
+class PSLB(torch.nn.Module):
+    def __init__(self, hidden_size, cross_attention_dim=None, rank=4):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.cross_attention_dim = cross_attention_dim
+        self.rank = rank
+
+        self.to_q_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
+        # self.to_q_lora = LoRALinearLayer(cross_attention_dim, hidden_size, rank)
+        self.to_k_lora = LoRALinearLayer(cross_attention_dim, hidden_size, rank)
+        self.to_v_lora = LoRALinearLayer(cross_attention_dim, hidden_size, rank)
+        self.to_out_lora = LoRALinearLayer(hidden_size, hidden_size, rank)
+
+    # lora scale :[0.1 0.2 0.5 0.8 1.0]
+    #             [  1   1   1   .  1 ]
+    def __call__(
+        self, attn, hidden_states, encoder_hidden_states=None, 
+        attention_mask=None, scale=0.8
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)

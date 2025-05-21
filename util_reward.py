@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 from torchvision.transforms import ToTensor
 from sklearn.metrics.pairwise import cosine_similarity
+from util_similarity import SSIM,hist_similarity,PSNR,MSE
 
 weights={'clothing': 0.5, 'limbs': 0.2, 'hands': 0.3}
 def get_bounding_rectangles(mask: np.ndarray):
@@ -45,6 +46,7 @@ def masked_cosine(img1, img2, mask:PIL.Image):
         计算余弦相似度
     '''
     mask_rect = get_bounding_rectangles(np.array(mask))
+    mask_rect = [ x for x in mask_rect if x[2]>15 and x[3]>15]
     all_sim = []
     
     # mask_tensor = ToTensor()(mask).unsqueeze(0)  # [1,1,H,W]
@@ -56,6 +58,8 @@ def masked_cosine(img1, img2, mask:PIL.Image):
     # flat2 = masked2.view(1, -1).numpy()
     # sim = cosine_similarity(flat1, flat2)[0][0]
     
+    tensor2pil = lambda t : Image.fromarray(np.array(t.permute(1,2,0).cpu()*255,dtype=np.uint8))
+    tensor2imgnp = lambda t : np.array(t.permute(1,2,0).cpu()*255,dtype=np.uint8)
     # 计算每个外接矩形的相似度
     for rect in mask_rect:
         x, y, w, h = rect
@@ -64,24 +68,44 @@ def masked_cosine(img1, img2, mask:PIL.Image):
         img2_region = img2[:, :, y:y+h, x:x+w].contiguous()
         
         # 计算余弦相似度
-        flat1 = img1_region.view(1, -1).numpy()
-        flat2 = img2_region.view(1, -1).numpy()
-        sim = 1-cosine_similarity(flat1, flat2)[0][0]
+        # flat1 = img1_region.view(1, -1).numpy()
+        # flat2 = img2_region.view(1, -1).numpy()
+        # im1_pil = tensor2pil(img1_region[0])
+        im1_np = tensor2imgnp(img1_region[0])
+        # im2_pil = tensor2pil(img2_region[0])
+        im2_np = tensor2imgnp(img2_region[0])
+        # cossim = 1-cosine_similarity(flat1, flat2)[0][0]
+        # sim = 1- np.mean( (flat1- flat2) ** 2 )
+        # sim_mse = MSE(im1_np,im2_np) # small
+        # sim_psnr = PSNR(im1_np,im2_np)  # big
+        # sim_ssim,_ = SSIM(im1_np,im2_np) # big
+        sim_hist1 = hist_similarity(im1_np,im2_np,compare=cv2.HISTCMP_CORREL)          # big
+        # sim_hist2 = hist_similarity(im1_np,im2_np,compare=cv2.HISTCMP_INTERSECT)       # big
+        # sim_hist3 = hist_similarity(im1_np,im2_np,compare=cv2.HISTCMP_CHISQR)          # small
+        # sim_hist4 = hist_similarity(im1_np,im2_np,compare=cv2.HISTCMP_BHATTACHARYYA)   # small
+        sim  = sim_hist1
         all_sim.append(sim)
-    # 每个sim需要根据区域大小进行加权
-    weights = []
-    for rect in mask_rect:
-        x, y, w, h = rect
-        area = w * h
-        weights.append(area)
-    # 归一化权重
-    weights = np.array(weights) / np.sum(weights)
-    # 计算加权平均相似度
-    all_sim_np = np.array(all_sim)
-    similarity = np.dot(weights, all_sim_np)
-
+        # 把 上面的 sim 写进 文档里
+        # line = f'cos {cossim} mse {sim_mse} PSNR {sim_psnr} SSIM {sim_ssim} hist1 {sim_hist1} hist2 {sim_hist2} hist3 {sim_hist3} hist4 {sim_hist4}\n'
+        # with open('log_origin.txt','a',encoding='utf-8') as f:
+        #     f.write(line)
+    if all_sim:
+        # 每个sim需要根据区域大小进行加权
+        weights = []
+        for rect in mask_rect:
+            x, y, w, h = rect
+            area = w * h
+            weights.append(area)
+        # 归一化权重
+        weights = np.array(weights) / np.sum(weights)
+        # 计算加权平均相似度
+        all_sim_np = np.array(all_sim)
+        similarity = np.dot(weights, all_sim_np)
+        return similarity
+    else:
+        return .0
     # 计算所有区域加权求和后的相似度
-    return similarity if all_sim else 0.0
+    # return similarity if all_sim else 0.0
 
 
 def get_similarity(model_path='',

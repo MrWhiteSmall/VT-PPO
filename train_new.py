@@ -222,6 +222,7 @@ def _get_batch(data_iter_loader, data_iterator, prompt_list, args, accelerator):
   for i in range(len(batch)):
     # batch text只取前两句话
     batch[i]['text'] = '.'.join(batch[i]['text'].split('.')[:1])
+    batch[i]['cloth_text'] = '.'.join(batch[i]['cloth_text'].split('.')[:1])
     batch_list.extend([batch[i] for _ in range(args.num_samples)])
   batch = batch_list
   return batch
@@ -269,7 +270,8 @@ def _collect_rollout(args, pipe, is_ddp,
   """Collects trajectories."""
   person_path = osj(data_root,batch[0]['image_file']) 
   cloth_path = osj(data_root,batch[0]['cloth_file'])
-  text      = batch[0]['text']
+  # text      = batch[0]['text']
+  text      = batch[0]['cloth_text']
   # mask_path = batch['mask']
   person_image, cloth_image = \
         [Image.open(path) 
@@ -412,6 +414,7 @@ def _collect_rollout(args, pipe, is_ddp,
         state_dict["guided_prompt_embeds"] = torch.cat(
             (state_dict["guided_prompt_embeds"], guided_prompt_embeds)
         )
+      # image.save('tmp.jpg')
       del (
           image,
           latents_list,
@@ -531,7 +534,7 @@ def _train_policy_func(
         batch_timestep.cuda()).reshape([args.p_batch_size, 1])
   else:
     adv = batch_final_reward.cuda().reshape([args.p_batch_size, 1])
-  ratio = torch.exp(log_prob.cuda() - batch_log_prob.cuda())  # ratio 恒等于 1
+  ratio = torch.exp(log_prob.cuda() - batch_log_prob.cuda()) 
   ratio = torch.clamp(ratio, 1.0 - args.ratio_clip, 1.0 + args.ratio_clip)
   loss = (
       -args.reward_weight
@@ -942,6 +945,7 @@ def main():
       del tot_val_loss
       torch.cuda.empty_cache()
 
+    # continue
     # policy learning
     tpfdata = TrainPolicyFuncData()
     for _ in range(args.p_step): # 5
@@ -1007,8 +1011,10 @@ def main():
       # if True or global_step % args.checkpointing_steps == 0:
       if global_step % args.checkpointing_steps == 0: # 2000
         if accelerator.is_main_process:
-          save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+          # save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+          save_path = os.path.join(args.output_dir, f"try-{global_step}")
           accelerator.save_state(output_dir=save_path)
+          # accelerator.load_state(save_path)
           logger.info(f"Saved state to {save_path}")
       print("global_step", global_step)
 

@@ -18,7 +18,7 @@ from torch.distributions import Normal
 from diffusers.schedulers.scheduling_ddim import DDIMSchedulerOutput
 from safetensors.torch import save_file
 
-from model.attn_processor import SkipAttnProcessor,LoRACrossAttnProcessor
+from model.attn_processor import SkipAttnProcessor,LoRACrossAttnProcessor,PSLB
 from model.utils import get_trainable_module, init_adapter
 from cat_utils import (compute_vae_encodings, numpy_to_pil, prepare_image,
                    prepare_mask_image, resize_and_crop, resize_and_padding)
@@ -343,16 +343,19 @@ class CatVTONPipeline:
         # Error no file named diffusion_pytorch_model.bin found in directory /root/lsj/checkpoints/ootd
         self.unet = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
         # self.unet = self.unet.float()
-        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet")
-        init_adapter(self.unet, cross_attn_cls=LoRACrossAttnProcessor)  # Skip Cross-Attention
+        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
+        init_adapter(self.unet, cross_attn_cls=PSLB)  # Skip Cross-Attention
         init_adapter(self.unet_copy, cross_attn_cls=SkipAttnProcessor)  # Skip Cross-Attention
         
         # print(self.unet)
         # print(self.unet_copy)
         
         self.attn_modules = get_trainable_module(self.unet, "attention2")
+        self.attn_modules1 = get_trainable_module(self.unet, "attention")
         self.attn_modules_copy = get_trainable_module(self.unet_copy, "attention")
-        self.attn_modules = self.attn_modules.to(device, dtype=weight_dtype)
+        self.attn_modules.to(device, dtype=weight_dtype)
+        self.attn_modules1.to(device, dtype=weight_dtype)
+        self.attn_modules_copy.to(device, dtype=weight_dtype)
         # self.attn_modules_copy = self.attn_modules_copy.to(device, dtype=weight_dtype)
         self.optimizer = torch.optim.AdamW(
                 list(self.attn_modules.parameters()),
@@ -361,7 +364,7 @@ class CatVTONPipeline:
                 weight_decay=1e-2,
                 eps=1e-08,
         )
-        # self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
+        self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
         self.auto_attn_ckpt_load_copy(attn_ckpt, attn_ckpt_version)
         
         self.vae.requires_grad_(False)
@@ -369,6 +372,7 @@ class CatVTONPipeline:
         self.safety_checker.requires_grad_(False)
         self.unet.requires_grad_(False)
         self.unet_copy.requires_grad_(False)
+        self.attn_modules1.requires_grad_(False)
         self.attn_modules_copy.requires_grad_(False)
         self.attn_modules.requires_grad_(True)
         
@@ -798,11 +802,11 @@ class CatVTONPipeline:
         }[version]
         if os.path.exists(attn_ckpt):
             print(os.path.join(attn_ckpt, sub_folder, 'attention'))
-            load_checkpoint_in_model(self.attn_modules, os.path.join(attn_ckpt, sub_folder, 'attention'))
+            load_checkpoint_in_model(self.attn_modules1, os.path.join(attn_ckpt, sub_folder, 'attention'))
         else:
             repo_path = snapshot_download(repo_id=attn_ckpt)
             print(f"Downloaded {attn_ckpt} to {repo_path}")
-            load_checkpoint_in_model(self.attn_modules, os.path.join(repo_path, sub_folder, 'attention'))
+            load_checkpoint_in_model(self.attn_modules1, os.path.join(repo_path, sub_folder, 'attention'))
             
     def auto_attn_ckpt_load_copy(self, attn_ckpt, version):
         sub_folder = {
