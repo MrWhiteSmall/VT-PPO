@@ -19,6 +19,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMSchedulerOutput
 from safetensors.torch import save_file
 
 from model.attn_processor import SkipAttnProcessor,LoRACrossAttnProcessor,PSLB
+from model.attn_processor_self import MyLoraAttnProcessor2_0
 from model.utils import get_trainable_module, init_adapter
 from cat_utils import (compute_vae_encodings, numpy_to_pil, prepare_image,
                    prepare_mask_image, resize_and_crop, resize_and_padding)
@@ -327,6 +328,7 @@ class CatVTONPipeline:
         skip_safety_check=False,
         use_tf32=True,
         is_train=False,
+        rank=4,scale=.2
     ):
         self.device = device
         self.is_train = is_train
@@ -341,56 +343,102 @@ class CatVTONPipeline:
         self.feature_extractor = CLIPImageProcessor.from_pretrained(base_ckpt, subfolder="feature_extractor")
         self.safety_checker = StableDiffusionSafetyChecker.from_pretrained(base_ckpt, subfolder="safety_checker").to(device, dtype=weight_dtype)
         # Error no file named diffusion_pytorch_model.bin found in directory /root/lsj/checkpoints/ootd
-        self.unet = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
-        # self.unet = self.unet.float()
-        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet").to(device, dtype=weight_dtype)
-        init_adapter(self.unet, cross_attn_cls=PSLB)  # Skip Cross-Attention
+        self.unet = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet")
+        self.unet_copy = UNet2DConditionModel.from_pretrained(base_ckpt, subfolder="unet")
+        
+        init_adapter(self.unet, cross_attn_cls=SkipAttnProcessor)  # Skip Cross-Attention
         init_adapter(self.unet_copy, cross_attn_cls=SkipAttnProcessor)  # Skip Cross-Attention
         
-        # print(self.unet)
-        # print(self.unet_copy)
-        
-        self.attn_modules = get_trainable_module(self.unet, "attention2")
-        self.attn_modules1 = get_trainable_module(self.unet, "attention")
+        self.attn_modules = get_trainable_module(self.unet, "attention")
         self.attn_modules_copy = get_trainable_module(self.unet_copy, "attention")
-        self.attn_modules.to(device, dtype=weight_dtype)
-        self.attn_modules1.to(device, dtype=weight_dtype)
-        self.attn_modules_copy.to(device, dtype=weight_dtype)
+        
+        self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
+        self.auto_attn_ckpt_load_copy(attn_ckpt, attn_ckpt_version)
+        
+        #替换 attn1 为 mylora attn1 
+        attn_procs = {}
+        unet = self.unet
+        # unet_sd = unet.state_dict()
+        for name in unet.attn_processors.keys():
+            #如果是自注意力注意力attn1，那么设置为空，否则设置为交叉注意力的维度
+            cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+            #这里记录此时这个快的通道式
+            if name.startswith("mid_block"):
+            #'block_out_channels', [320, 640, 1280, 1280]
+                hidden_size = unet.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+            #name中的，up_block.的后一个位置就是表示是第几个上块
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = unet.config.block_out_channels[block_id]
+            if cross_attention_dim is None: # self attn
+                attn_procs[name] = MyLoraAttnProcessor2_0(hidden_size=hidden_size, 
+                                                          rank=rank,scale=scale)
+            else:
+                attn_procs[name] = SkipAttnProcessor(hidden_size=hidden_size, 
+                                              cross_attention_dim=cross_attention_dim,)
+        #最后这里将unet的注意力处理器设置为自己重构后的注意力字典
+        unet.set_attn_processor(attn_procs)
+        
+        self.attn_modules_lora = get_trainable_module(self.unet, "attention_lora")
+        
+        self.unet.requires_grad_(False)
+        self.unet_copy.requires_grad_(False)
+        self.attn_modules.requires_grad_(False)
+        self.attn_modules_lora.requires_grad_(True)
+        self.attn_modules_copy.requires_grad_(False)
+        
+        self.unet.to(device, dtype=weight_dtype)
+        self.unet_copy.to(device, dtype=weight_dtype)
+        # self.attn_modules = self.attn_modules.to(device, dtype=weight_dtype)
         # self.attn_modules_copy = self.attn_modules_copy.to(device, dtype=weight_dtype)
+        
+        # 检查是否只有LoRA参数可训练
+        for name, param in unet.named_parameters():
+            if "lora_" in name and not param.requires_grad:
+                print(f"ERROR: LoRA参数 {name} 未启用梯度！")
+            if "to_q.weight" in name and param.requires_grad:
+                print(f"ERROR: 原始权重 {name} 未被冻结！")
+
+        
         self.optimizer = torch.optim.AdamW(
-                list(self.attn_modules.parameters()),
+                list(self.attn_modules_lora.parameters()),
                 lr=1e-5,
                 betas=(0.9, 0.99),
                 weight_decay=1e-2,
                 eps=1e-08,
         )
-        self.auto_attn_ckpt_load(attn_ckpt, attn_ckpt_version)
-        self.auto_attn_ckpt_load_copy(attn_ckpt, attn_ckpt_version)
-        
-        self.vae.requires_grad_(False)
-        # self.feature_extractor.requires_grad_(False)
-        self.safety_checker.requires_grad_(False)
-        self.unet.requires_grad_(False)
-        self.unet_copy.requires_grad_(False)
-        self.attn_modules1.requires_grad_(False)
-        self.attn_modules_copy.requires_grad_(False)
-        self.attn_modules.requires_grad_(True)
-        
         # Pytorch 2.0 Compile
-        self.unet_copy.eval()
-
-        self.vae = torch.compile(self.vae, mode="reduce-overhead")
+        # if compile:
         # self.unet = torch.compile(self.unet)
+        # self.unet_copy = torch.compile(self.unet_copy)
+        self.vae = torch.compile(self.vae, mode="reduce-overhead")
             
         # Enable TF32 for faster training on Ampere GPUs (A100 and RTX 30 series).
         # if use_tf32:
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         
-        self.attn_modules.train()
+        self.vae.requires_grad_(False)
+        self.safety_checker.requires_grad_(False)
+        # self.unet.requires_grad_(False)
+        # self.unet_copy.requires_grad_(False)
+        # self.attn_modules.requires_grad_(False)
+        self.attn_modules_lora.train()
 
-        
         self.collecting = []
+
+    def save_lora(self,lora_path=''):
+        torch.save(
+            {n: p for n, p in self.attn_modules_lora.named_parameters() if "lora_" in n},
+            lora_path if lora_path else "lora_weights.pt"
+        )
+    def load_lora(self,lora_path=''):
+        lora_weights = torch.load(lora_path if lora_path else "lora_weights.pt")
+        self.unet.load_state_dict(lora_weights, strict=False)
+
 
     def forward_collect_traj_ddim(self, 
         image: Union[PIL.Image.Image, torch.Tensor],
@@ -802,11 +850,11 @@ class CatVTONPipeline:
         }[version]
         if os.path.exists(attn_ckpt):
             print(os.path.join(attn_ckpt, sub_folder, 'attention'))
-            load_checkpoint_in_model(self.attn_modules1, os.path.join(attn_ckpt, sub_folder, 'attention'))
+            load_checkpoint_in_model(self.attn_modules, os.path.join(attn_ckpt, sub_folder, 'attention'))
         else:
             repo_path = snapshot_download(repo_id=attn_ckpt)
             print(f"Downloaded {attn_ckpt} to {repo_path}")
-            load_checkpoint_in_model(self.attn_modules1, os.path.join(repo_path, sub_folder, 'attention'))
+            load_checkpoint_in_model(self.attn_modules, os.path.join(repo_path, sub_folder, 'attention'))
             
     def auto_attn_ckpt_load_copy(self, attn_ckpt, version):
         sub_folder = {

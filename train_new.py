@@ -103,7 +103,7 @@ def _update_output_dir(args):
       + "_g"
       + str(args.gradient_accumulation_steps)
   )
-  learning_log += "_l" + str(args.lora_rank)
+  learning_log += "_l" + str(args.rank)
   coeff_log = "_kl" + str(args.kl_weight) + "_re" + str(args.reward_weight)
   if args.kl_warmup > 0:
     coeff_log += "_klw" + str(args.kl_warmup)
@@ -293,10 +293,13 @@ def _collect_rollout(args, pipe, is_ddp,
     target_shape = (384 , 512) # w h
     model_img_pil = pose_img_pil.resize(target_shape)
     model_parse, _ = parsing_model(model_img_pil.resize(target_shape))
-    human_mask, head_mask, cloth_mask = get_mask_location_all(model_parse)
+    mask_clothing,mask_clothing_upper,mask_clothing_lower, \
+    mask_limbs, mask_hands = get_mask_location_all(model_parse)
     # 保存一下cloth mask 下次可以直接读取
     save_dir = os.path.join(data_root, "cloth_mask")
     os.makedirs(save_dir, exist_ok=True)
+    
+    cloth_mask = mask_clothing_upper
     cloth_mask.save(os.path.join(save_dir, person_path.split("/")[-1].replace(".jpg", ".png")))
   person_image = person_image.resize(model_input_shape)
   cloth_image = cloth_image.resize(model_input_shape)
@@ -641,9 +644,6 @@ def main():
   
   reward_clip_model.requires_grad_(False)
 
-  # pipe = StableDiffusionPipelineExtended.from_pretrained(
-  #     CLIP_CKP, torch_dtype=weight_dtype
-  # )
   pipe = CatVTONPipeline(
       base_ckpt=args.base_model_path,
       attn_ckpt=args.resume_path,
@@ -656,8 +656,12 @@ def main():
       device="cuda",
       skip_safety_check=True,
       is_train=True,
+      rank=args.rank,
+      scale=args.lora_scale,
   )
   unet = pipe.unet
+  
+  # pipe.save_lora('save_lora_path')
 
   # pretrain model to calculate kl
   unet_copy = pipe.unet_copy
@@ -696,7 +700,7 @@ def main():
 
 
   # unet.set_attn_processor(lora_attn_procs)
-  lora_layers = pipe.attn_modules
+  lora_layers = pipe.attn_modules_lora
 
   # Enable TF32 for faster training on Ampere GPUs,
   # cf https://pytorch.org/docs/stable/notes/cuda.
@@ -1011,10 +1015,11 @@ def main():
       # if True or global_step % args.checkpointing_steps == 0:
       if global_step % args.checkpointing_steps == 0: # 2000
         if accelerator.is_main_process:
-          # save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-          save_path = os.path.join(args.output_dir, f"try-{global_step}")
+          save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+          save_lora_path = os.path.join(args.output_dir, f"checkpoint-{global_step}",
+                                        'lora.pt')
           accelerator.save_state(output_dir=save_path)
-          # accelerator.load_state(save_path)
+          pipe.save_lora(save_lora_path)
           logger.info(f"Saved state to {save_path}")
       print("global_step", global_step)
 

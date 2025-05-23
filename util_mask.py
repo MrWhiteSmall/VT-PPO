@@ -1,7 +1,7 @@
 import pdb
 
 import numpy as np
-import cv2
+import cv2,os
 from PIL import Image, ImageDraw
 
 label_map = {
@@ -24,7 +24,85 @@ label_map = {
     "bag": 16,
     "scarf": 17,
 }
+def get_mask_location_all(model_parse: Image.Image=None,
+                             model_parse_path='', width=384, height=512):
+    if os.path.exists(model_parse_path):
+        model_parse = Image.open(model_parse_path)
+    else:
+        model_parse = model_parse
+    # Resize and convert to numpy array
+    im_parse = model_parse.resize((width, height), Image.NEAREST)
+    parse_array = np.array(im_parse)
+    
+    # Initialize empty masks
+    mask_clothing = np.zeros_like(parse_array, dtype=np.float32)
+    mask_clothing_upper = np.zeros_like(parse_array, dtype=np.float32)
+    mask_clothing_lower = np.zeros_like(parse_array, dtype=np.float32)
+    mask_limbs = np.zeros_like(parse_array, dtype=np.float32)
+    mask_hands = np.zeros_like(parse_array, dtype=np.float32)
+    
+    # Define label groups for each mask
+    clothing_labels = [
+        "upper_clothes", "skirt", "pants", "dress", 
+        "belt", "scarf"
+    ]
+    upper_labels = [
+        "upper_clothes", "dress", 
+    ]
+    lower_labels = [
+        "skirt", "pants" 
+    ]
+    
+    limbs_labels = [
+        "left_leg", "right_leg", 
+        "left_shoe", "right_shoe",
+        "head","neck",'hair',"sunglasses",
+    ]
+    
+    hands_labels = [
+        "left_arm", "right_arm"  # Note: Add these to your label_map if needed
+    ]
+    
+    # Build masks by aggregating relevant labels
+    for label_name, label_value in label_map.items():
+        if label_name in clothing_labels:
+            mask_clothing += (parse_array == label_value).astype(np.float32)
+        if label_name in upper_labels:
+            mask_clothing_upper += (parse_array == label_value).astype(np.float32)
+        if label_name in lower_labels:
+            mask_clothing_lower += (parse_array == label_value).astype(np.float32)
+        if label_name in limbs_labels:
+            mask_limbs += (parse_array == label_value).astype(np.float32)
+        if label_name in hands_labels:
+            mask_hands += (parse_array == label_value).astype(np.float32)
+    
+    # Apply morphological operations
+    kernel = np.ones((3, 3), np.uint8)
+    
+    def refine_mask(mask):
+        """Apply morphological refinement to mask"""
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        return mask
+    
+    # Refine each mask
+    mask_clothing = refine_mask(mask_clothing)
+    mask_clothing_upper = refine_mask(mask_clothing_upper)
+    mask_clothing_lower = refine_mask(mask_clothing_lower)
+    mask_limbs = refine_mask(mask_limbs)
+    mask_hands = refine_mask(mask_hands)
+    
+    # Convert to PIL Images
+    mask_clothing = Image.fromarray((mask_clothing * 255).astype(np.uint8))
+    mask_clothing_upper = Image.fromarray((mask_clothing_upper * 255).astype(np.uint8))
+    mask_clothing_lower = Image.fromarray((mask_clothing_lower * 255).astype(np.uint8))
+    mask_limbs = Image.fromarray((mask_limbs * 255).astype(np.uint8))
+    mask_hands = Image.fromarray((mask_hands * 255).astype(np.uint8))
+    
+    return mask_clothing,mask_clothing_upper,mask_clothing_lower, \
+        mask_limbs, mask_hands
 
+   
 def extend_arm_mask(wrist, elbow, scale):
   wrist = elbow + scale * (wrist - elbow)
   return wrist
@@ -153,8 +231,10 @@ def get_mask_location(model_parse: Image.Image, keypoint: dict, width=384,height
     return mask, mask_gray
 
 
+ 
 
-def get_mask_location_all(model_parse: Image.Image, width=384,height=512):
+
+def get_mask_location_all2(model_parse: Image.Image, width=384,height=512):
     im_parse = model_parse.resize((width, height), Image.NEAREST)
     parse_array = np.array(im_parse)
     # print(np.array(parse_array).shape) # (512, 384)

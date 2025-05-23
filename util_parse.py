@@ -11,13 +11,14 @@ import torch
 3 online ppo 训练采样次数的超参，默认是 5 次，然后梯度累计反传  以及  单次采样步数的超参 默认是 12（实验≥8 次）
 
 '''
-ls=0.8
+ls=0.5
+rank = 4
 wc=.5
 wl=.2
 wh=.3
 policy_alpha=100 # reward weight
 policy_beta=0.01 # KL weight
-sample_times=5 # s
+sample_times=4 # s
 sample_steps_per_time=12 # st
 # _clotxt
 outdir = f'output_ls{ls}_wc{wc}_wl{wl}_wh{wh}_pa{policy_alpha}_pb{policy_beta}_s{sample_times}_st{sample_steps_per_time}'
@@ -36,13 +37,19 @@ resume_from_checkpoint = None
 # resume_path = ''
 
 # 采样步数
-gradient_accumulation_steps = 3
-p_step = 5
+gradient_accumulation_steps = sample_times
+p_step = sample_steps_per_time
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Training and evaluation script")
     # 模型路径相关参数
     model_path_group = parser.add_argument_group("Model Paths")
+    model_path_group.add_argument(
+        "--lora_scale",
+        type=float,
+        default=ls,
+        help="lora scale"
+    )
     model_path_group.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
@@ -579,9 +586,9 @@ def parse_args():
         help="Whether to use multi-GPU."
     )
     experimental_group.add_argument(
-        "--lora_rank", 
+        "--rank", 
         type=int, 
-        default=4,
+        default=rank,
         help="Rank for LoRA."
     )
     

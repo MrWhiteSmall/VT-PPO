@@ -79,6 +79,12 @@ def get_trainable_module(unet, trainable_module_name):
             if "attn1" in name:
                 attn_blocks.append(param)
         return attn_blocks
+    elif trainable_module_name == "attention_lora":
+        attn_blocks = torch.nn.ModuleList()
+        for name, param in unet.named_modules():
+            if "lora" in name:
+                attn_blocks.append(param)
+        return attn_blocks
     elif trainable_module_name == "attention2":
         attn_blocks = torch.nn.ModuleList()
         for name, param in unet.named_modules():

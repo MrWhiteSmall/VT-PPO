@@ -3,6 +3,54 @@ import torch
 import torch.nn as nn
 # from flash_attn import flash_attn_func
 
+class LoRASelfAttention(nn.Module):
+    def __init__(self, original_attention, rank=8, alpha=8):
+        super().__init__()
+        self.original_attention = original_attention  # 原始Attention层（冻结）
+        
+        # 获取原始线性层的输入/输出维度
+        hidden_size = original_attention.to_q.in_features
+        proj_size = original_attention.to_q.out_features
+        
+        # 为to_q/k/v添加LoRA
+        self.lora_q = LoRALayer(hidden_size, proj_size, rank, alpha)
+        self.lora_k = LoRALayer(hidden_size, proj_size, rank, alpha)
+        self.lora_v = LoRALayer(hidden_size, proj_size, rank, alpha)
+        
+        # 冻结原始权重
+        for param in original_attention.parameters():
+            param.requires_grad_(False)
+
+    def forward(self, x):
+        # 原始计算 + LoRA
+        q = self.original_attention.to_q(x) + self.lora_q(x)
+        k = self.original_attention.to_k(x) + self.lora_k(x)
+        v = self.original_attention.to_v(x) + self.lora_v(x)
+        
+        query = attn.head_to_batch_dim(query)
+        
+        # 剩余Attention逻辑（如softmax）保持不变
+        attn_output = ...  # 原始Attention计算
+        return attn_output
+
+class LoRALayer(nn.Module):
+    def __init__(self, in_dim, out_dim, rank, alpha):
+        super().__init__()
+        self.lora_A = nn.Linear(in_dim, rank, bias=False)
+        self.lora_B = nn.Linear(rank, out_dim, bias=False)
+        self.scale = alpha / rank  # 控制LoRA更新强度
+        
+        # 初始化A/B（通常A用高斯初始化，B初始化为0）
+        nn.init.normal_(self.lora_A.weight, std=0.02)
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x):
+        return self.lora_B(self.lora_A(x)) * self.scale
+
+####
+####
+####
+
 class LoRALinearLayer(torch.nn.Module):
     def __init__(self, in_features, out_features, rank=8):
         super().__init__()
@@ -92,7 +140,7 @@ class PSLB(torch.nn.Module):
     #             [  1   1   1   .  1 ]
     def __call__(
         self, attn, hidden_states, encoder_hidden_states=None, 
-        attention_mask=None, scale=0.8
+        attention_mask=None, scale=0.2
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
