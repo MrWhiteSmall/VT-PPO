@@ -11,12 +11,12 @@ import torch
 3 online ppo 训练采样次数的超参，默认是 5 次，然后梯度累计反传  以及  单次采样步数的超参 默认是 12（实验≥8 次）
 
 '''
-ls=0.5
+ls=0.2
 rank = 4
 wc=.5
 wl=.2
 wh=.3
-policy_alpha=100 # reward weight
+policy_alpha=10 # reward weight
 policy_beta=0.01 # KL weight
 sample_times=4 # s
 sample_steps_per_time=12 # st
@@ -354,7 +354,7 @@ def parse_args():
     rl_group.add_argument(
         "--reward_weight", 
         type=float, 
-        default=100,
+        default=policy_alpha,
         help="Weight of reward loss."
     )
     rl_group.add_argument(
@@ -372,7 +372,7 @@ def parse_args():
     rl_group.add_argument(
         "--kl_weight", 
         type=float, 
-        default=0.01,
+        default=policy_beta,
         help="Weight of kl loss."
     )
     rl_group.add_argument(

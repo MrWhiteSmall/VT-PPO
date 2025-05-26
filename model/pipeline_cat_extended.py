@@ -585,19 +585,20 @@ class CatVTONPipeline:
                     
                     # 这里的log 计算的是 p(x_t-1|x_t,z_t)
                     #       公式中 通过 xt zt 计算 可能的 x_t-1 并计算转移过去的概率
-                    pesudo_latents, log_prob = self.noise_scheduler.step_logprob(
+                    latents, log_prob = self.noise_scheduler.step_logprob(
                         noise_pred, unet_t, latents, **extra_step_kwargs
                     )
-                    pesudo_latents = pesudo_latents.prev_sample
+                    latents = latents.prev_sample
                     # latents = latents.to(inpainting_latent_model_input.dtype)
                     
                     # 这个才是真的 latents
                     # 上面是加了一个随机噪声而已  这里的latent用于 下一个函数 p( x_t-1|x_t )
                     #       公式中 并不知道 x_t-1如何计算，所以直接给出当前的预测内容
                     #           后续中 x_t-1 就是时间步计算所需的 label
-                    latents = self.noise_scheduler.step(
-                        noise_pred, t, latents, **extra_step_kwargs
-                    ).prev_sample
+                    # latents = self.noise_scheduler.step(
+                    #     noise_pred, t, latents, **extra_step_kwargs
+                    # ).prev_sample
+                    # latents = pesudo_latents
                     self.latents_list.append((
                                               latents
                                               ).detach().clone().cpu())
